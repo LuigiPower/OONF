@@ -64,6 +64,8 @@
 #include "mpr/neighbor-graph.h"
 #include "mpr/selection-rfc7181.h"
 
+#include "olsrv2/olsrv2_tc.h"
+
 /* FIXME remove unneeded includes */
 
 static void _calculate_n(const struct nhdp_domain *domain, struct neighbor_graph *graph);
@@ -336,6 +338,11 @@ _select_greatest_by_property(const struct nhdp_domain *domain, struct neighbor_g
 static void
 _process_remaining(const struct nhdp_domain *domain, struct neighbor_graph *graph) {
   struct n1_node *node_n1;
+  //struct _node_id_str node_id1;//, node_id2;
+  //struct n1_node *tiebreak_n1;
+  //int tiebreak_selcount = -1;
+  //struct addr_node *n2;
+  struct olsrv2_tc_node *node;
   bool done;
 
 #ifdef OONF_LOG_DEBUG_INFO
@@ -363,6 +370,7 @@ _process_remaining(const struct nhdp_domain *domain, struct neighbor_graph *grap
      *  - D(X)
      *  - Information freshness
      *  - Duration of previous MPR selection...
+     *
      */
 
     if (graph->set_mpr_candidates.count == 0) {
@@ -372,19 +380,100 @@ _process_remaining(const struct nhdp_domain *domain, struct neighbor_graph *grap
     }
     else if (graph->set_mpr_candidates.count == 1) {
       /* a unique candidate was found */
-      node_n1 = avl_first_element(&graph->set_mpr_candidates, node_n1, _avl_node);
-      OONF_DEBUG(LOG_MPR, "Unique candidate %s", netaddr_to_string(&buf1, &node_n1->addr));
+      node_n1 = avl_first_element(&graph->set_mpr_candidates,
+          node_n1, _avl_node);
+      OONF_DEBUG(LOG_MPR, "Unique candidate %s",
+                 netaddr_to_string(&buf1, &node_n1->addr));
       mpr_add_n1_node_to_set(&graph->set_mpr, node_n1->neigh, node_n1->link, node_n1->table_offset);
       node_n1->neigh->selection_is_mpr = true;
       avl_remove(&graph->set_mpr_candidates, &node_n1->_avl_node);
       free(node_n1);
-      //      done = true;
+//      done = true;
     }
     else {
       /* Multiple candidates were found; arbitrarily add one of the
        * candidate nodes (first in list). */
-      node_n1 = avl_first_element(&graph->set_mpr_candidates, node_n1, _avl_node);
-      OONF_DEBUG(LOG_MPR, "Multiple candidates, select %s", netaddr_to_string(&buf1, &node_n1->addr));
+
+      /*
+       *  Use SSTB method instead (Selector Set Tie Breaker)
+       *  Rank the 2-neighborhood nodes giving priority to those
+       *  that have already been chosen as MPRs by other nodes.
+       */
+      OONF_DEBUG(LOG_MPR, "CUSTOM_MPR Multiple candidates available, now iterating over them");
+      avl_for_each_element(&graph->set_mpr_candidates, node_n1, _avl_node) {
+        //TODO choose mpr between candidates based on number of selectors (higher is better)
+        //TODO Find out how to obtain number of Selectors of an MPR
+        //Based on the Article, the MPR includes the complete list of selectors in it's TC messages
+        //(Topology Control messages)
+        OONF_DEBUG(LOG_MPR, "CUSTOM_MPR Multiple candidates available: %s",
+            netaddr_to_string(&buf1, &node_n1->addr));
+
+        /*
+         * Iterate over network
+         * Obtain number of selectors for n2 TODO how? maybe simply count incoming edges to n2
+         * Store number of selectors somewhere TODO decide what somewhere is
+         * Sort by number of selectors TODO how?
+         * (No need to sort, simply save the current one with maximum number
+         * then use it directly after the for each)
+         * Pick the node with highest number of selectors (edges)
+         * TODO Avoid iterating over entire network
+         */
+
+      }
+
+      avl_for_each_element(olsrv2_tc_get_tree(), node, _originator_node) {
+        //if (netaddr_get_address_family(&node->target.prefix.dst) == af_type) {
+        //_get_tc_node_id(&node_id1, node);
+        avl_for_each_element(&graph->set_mpr_candidates, node_n1, _avl_node) {
+           if (netaddr_cmp(&node_n1->addr, &node->target.prefix.dst) == 0) {
+             OONF_DEBUG(LOG_MPR, "CUSTOM_MPR same address in second foreach");
+           }
+
+           /*
+          avl_for_each_element(&node->_attached_networks, attached, _src_node) {
+            rt_entry = avl_find_element(rt_tree, &attached->dst->target.prefix, rt_entry, _node);
+            outgoing = rt_entry != NULL && netaddr_cmp(&rt_entry->originator, &node->target.prefix.dst) == 0;
+
+            _get_tc_endpoint_id(&node_id2, attached);
+
+            _print_graph_edge(session, domain, &node_id1, &node_id2, &node->target.prefix.dst,
+                &attached->dst->target.prefix.dst, attached->cost[domain->index], 0, attached->distance[domain->index],
+                outgoing, NETJSON_EDGE_ATTACHED, NULL);
+          }
+          */
+        }
+      }
+
+        /* print remote node links to neighbors */
+        /*
+           avl_for_each_element(olsrv2_tc_get_tree(), node, _originator_node) {
+           if (netaddr_get_address_family(&node->target.prefix.dst) == af_type) {
+           _get_tc_node_id(&node_id1, node);
+
+           avl_for_each_element(&node->_edges, edge, _node) {
+           if (!edge->virtual) {
+           if (netaddr_cmp(&edge->dst->target.prefix.dst, originator) == 0) {
+           continue;
+           }
+
+           rt_entry = avl_find_element(rt_tree, &edge->dst->target.prefix, rt_entry, _node);
+           outgoing = rt_entry != NULL && netaddr_cmp(&rt_entry->last_originator, &node->target.prefix.dst) == 0;
+
+           _get_tc_node_id(&node_id2, edge->dst);
+
+           _print_graph_edge(session, domain, &node_id1, &node_id2, &node->target.prefix.dst,
+           &edge->dst->target.prefix.dst, edge->cost[domain->index], edge->inverse->cost[domain->index], 0, outgoing,
+           NETJSON_EDGE_ROUTERS, NULL);
+           }
+           }
+           }
+           }
+           */
+      //}
+      node_n1 = avl_first_element(&graph->set_mpr_candidates,
+          node_n1, _avl_node);
+      OONF_DEBUG(LOG_MPR, "Multiple candidates, select %s",
+          netaddr_to_string(&buf1, &node_n1->addr));
       mpr_add_n1_node_to_set(&graph->set_mpr, node_n1->neigh, node_n1->link, node_n1->table_offset);
       node_n1->neigh->selection_is_mpr = true;
       avl_remove(&graph->set_mpr_candidates, &node_n1->_avl_node);
