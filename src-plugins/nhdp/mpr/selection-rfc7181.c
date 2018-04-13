@@ -65,6 +65,7 @@
 #include "mpr/selection-rfc7181.h"
 
 #include "olsrv2/olsrv2_tc.h"
+#include "olsrv2/olsrv2_originator.h"
 
 /* FIXME remove unneeded includes */
 
@@ -338,12 +339,17 @@ _select_greatest_by_property(const struct nhdp_domain *domain, struct neighbor_g
 static void
 _process_remaining(const struct nhdp_domain *domain, struct neighbor_graph *graph) {
   struct n1_node *node_n1;
+  struct n1_node *node_old_n1;
   //struct _node_id_str node_id1;//, node_id2;
-  //struct n1_node *tiebreak_n1;
-  //int tiebreak_selcount = -1;
+  struct n1_node *tiebreak_n1;
+  int tiebreak_selectors = -1, tmp_selectors = 0;
   //struct addr_node *n2;
+  struct olsrv2_tc_edge *edge;
   struct olsrv2_tc_node *node;
+  //struct olsrv2_tc_attachment *attached;
   bool done;
+  const struct netaddr *originator;
+  int af_type;
 
 #ifdef OONF_LOG_DEBUG_INFO
   struct netaddr_str buf1;
@@ -421,63 +427,94 @@ _process_remaining(const struct nhdp_domain *domain, struct neighbor_graph *grap
 
       }
 
+      node_n1 = avl_first_element(&graph->set_mpr_candidates,
+          node_n1, _avl_node);
+      node_old_n1 = node_n1;
+      tiebreak_n1 = node_n1;
+
+      //af_type = netaddr_get_address_family(originator);
+      originator = olsrv2_originator_get(AF_INET);
+      OONF_DEBUG(LOG_MPR, "CUSTOM_MPR Deciding MPR for: %s", netaddr_to_string(&buf1, originator));
+      originator = olsrv2_originator_get(AF_INET6);
+      OONF_DEBUG(LOG_MPR, "CUSTOM_MPR Deciding MPR for: %s", netaddr_to_string(&buf1, originator));
+      //if (netaddr_get_address_family(originator) != af_type) {
+      //}
+
+
       avl_for_each_element(olsrv2_tc_get_tree(), node, _originator_node) {
-        //if (netaddr_get_address_family(&node->target.prefix.dst) == af_type) {
-        //_get_tc_node_id(&node_id1, node);
         avl_for_each_element(&graph->set_mpr_candidates, node_n1, _avl_node) {
-           if (netaddr_cmp(&node_n1->addr, &node->target.prefix.dst) == 0) {
-             OONF_DEBUG(LOG_MPR, "CUSTOM_MPR same address in second foreach");
-           }
+          af_type = netaddr_get_address_family(&node_n1->addr);
+          if (netaddr_get_address_family(&node->target.prefix.dst) == af_type) {
+            //_get_tc_node_id(&node_id1, node);
+            if (netaddr_cmp(&node_n1->addr, &node->target.prefix.dst) == 0) {
+              OONF_DEBUG(LOG_MPR, "CUSTOM_MPR same address in second foreach: %s", netaddr_to_string(&buf1, &node->target.prefix.dst));
 
-           /*
-          avl_for_each_element(&node->_attached_networks, attached, _src_node) {
-            rt_entry = avl_find_element(rt_tree, &attached->dst->target.prefix, rt_entry, _node);
-            outgoing = rt_entry != NULL && netaddr_cmp(&rt_entry->originator, &node->target.prefix.dst) == 0;
+              tmp_selectors = 0;
+              avl_for_each_element(&node->_edges, edge, _node) {
+                OONF_DEBUG(LOG_MPR, "CUSTOM_MPR Iterating edges, dst: %s", netaddr_to_string(&buf1, &edge->dst->target.prefix.dst));
+                tmp_selectors++;
+              }
 
-            _get_tc_endpoint_id(&node_id2, attached);
+              if(tmp_selectors > tiebreak_selectors) {
+                tiebreak_selectors = tmp_selectors;
+                tiebreak_n1 = node_n1;
+              }
 
-            _print_graph_edge(session, domain, &node_id1, &node_id2, &node->target.prefix.dst,
-                &attached->dst->target.prefix.dst, attached->cost[domain->index], 0, attached->distance[domain->index],
-                outgoing, NETJSON_EDGE_ATTACHED, NULL);
+              /*
+                 avl_for_each_element(&node->_attached_networks, attached, _src_node) {
+                 OONF_DEBUG(LOG_MPR, "CUSTOM_MPR Iterating attached networks");
+                 OONF_DEBUG(LOG_MPR, "CUSTOM_MPR Node has an attached network %s",
+              //netaddr_to_string(&buf1, &node->target.prefix.dst),
+              netaddr_to_string(&buf1, &attached->dst->target.prefix.dst));
+              }
+              */
+            }
           }
-          */
         }
       }
 
-        /* print remote node links to neighbors */
-        /*
-           avl_for_each_element(olsrv2_tc_get_tree(), node, _originator_node) {
-           if (netaddr_get_address_family(&node->target.prefix.dst) == af_type) {
-           _get_tc_node_id(&node_id1, node);
+      OONF_DEBUG(LOG_MPR, "CUSTOM_MPR Multiple candidates, select %s with %d selectors",
+          netaddr_to_string(&buf1, &tiebreak_n1->addr), tiebreak_selectors);
+      OONF_DEBUG(LOG_MPR, "CUSTOM_MPR Multiple candidates, old selection would have been %s",
+          netaddr_to_string(&buf1, &node_old_n1->addr));
+      mpr_add_n1_node_to_set(&graph->set_mpr, tiebreak_n1->neigh, tiebreak_n1->link, tiebreak_n1->table_offset);
+      tiebreak_n1->neigh->selection_is_mpr = true;
+      avl_remove(&graph->set_mpr_candidates, &tiebreak_n1->_avl_node);
+      free(tiebreak_n1);
 
-           avl_for_each_element(&node->_edges, edge, _node) {
-           if (!edge->virtual) {
-           if (netaddr_cmp(&edge->dst->target.prefix.dst, originator) == 0) {
-           continue;
-           }
+      /*
+         rt_entry = avl_find_element(rt_tree, &attached->dst->target.prefix, rt_entry, _node);
+         outgoing = rt_entry != NULL && netaddr_cmp(&rt_entry->originator, &node->target.prefix.dst) == 0;
 
-           rt_entry = avl_find_element(rt_tree, &edge->dst->target.prefix, rt_entry, _node);
-           outgoing = rt_entry != NULL && netaddr_cmp(&rt_entry->last_originator, &node->target.prefix.dst) == 0;
+         _get_tc_endpoint_id(&node_id2, attached);
+         */
 
-           _get_tc_node_id(&node_id2, edge->dst);
+      /* print remote node links to neighbors */
+      /*
+         avl_for_each_element(olsrv2_tc_get_tree(), node, _originator_node) {
+         if (netaddr_get_address_family(&node->target.prefix.dst) == af_type) {
+         _get_tc_node_id(&node_id1, node);
 
-           _print_graph_edge(session, domain, &node_id1, &node_id2, &node->target.prefix.dst,
-           &edge->dst->target.prefix.dst, edge->cost[domain->index], edge->inverse->cost[domain->index], 0, outgoing,
-           NETJSON_EDGE_ROUTERS, NULL);
-           }
-           }
-           }
-           }
-           */
+         avl_for_each_element(&node->_edges, edge, _node) {
+         if (!edge->virtual) {
+         if (netaddr_cmp(&edge->dst->target.prefix.dst, originator) == 0) {
+         continue;
+         }
+
+         rt_entry = avl_find_element(rt_tree, &edge->dst->target.prefix, rt_entry, _node);
+         outgoing = rt_entry != NULL && netaddr_cmp(&rt_entry->last_originator, &node->target.prefix.dst) == 0;
+
+         _get_tc_node_id(&node_id2, edge->dst);
+
+         _print_graph_edge(session, domain, &node_id1, &node_id2, &node->target.prefix.dst,
+         &edge->dst->target.prefix.dst, edge->cost[domain->index], edge->inverse->cost[domain->index], 0, outgoing,
+         NETJSON_EDGE_ROUTERS, NULL);
+         }
+         }
+         }
+         }
+         */
       //}
-      node_n1 = avl_first_element(&graph->set_mpr_candidates,
-          node_n1, _avl_node);
-      OONF_DEBUG(LOG_MPR, "Multiple candidates, select %s",
-          netaddr_to_string(&buf1, &node_n1->addr));
-      mpr_add_n1_node_to_set(&graph->set_mpr, node_n1->neigh, node_n1->link, node_n1->table_offset);
-      node_n1->neigh->selection_is_mpr = true;
-      avl_remove(&graph->set_mpr_candidates, &node_n1->_avl_node);
-      free(node_n1);
     }
   }
 }
